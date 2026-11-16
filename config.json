@@ -1,0 +1,24 @@
+{
+  "server_history": [
+    {
+      "ip": "192.168.10.162",
+      "name": "192.168.10.162",
+      "last_connected": "2026-11-16 10:53:04"
+    },
+    {
+      "ip": "192.168.121.70",
+      "name": "192.168.121.70",
+      "last_connected": "2026-11-13 17:53:10"
+    },
+    {
+      "ip": "192.168.120.175",
+      "name": "192.168.120.175",
+      "last_connected": "2026-03-24 19:11:10"
+    }
+  ],
+  "client_history": [],
+  "last_server": "192.168.10.162",
+  "last_port": 9999,
+  "share_mouse": true,
+  "share_keyboard": true
+}

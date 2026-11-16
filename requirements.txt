@@ -1,0 +1,9 @@
+pynput>=1.7.6
+pyperclip>=1.8.2
+mss>=10.2,<12
+Pillow>=10.4
+pyobjc-framework-ScreenCaptureKit>=10.0; sys_platform == "darwin"
+pyobjc-framework-libdispatch>=10.0; sys_platform == "darwin"
+
+# 6.12.0 wheels corrupt None/True refcounts on Python 3.10/3.11 (PYSIDE-3474).
+PySide6-Essentials>=6.7,<7,!=6.12.0

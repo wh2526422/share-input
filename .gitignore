@@ -1,0 +1,7 @@
+.qt-deps/
+.venv/
+__pycache__/
+*.py[cod]
+.build-venv/
+dist/
+build/

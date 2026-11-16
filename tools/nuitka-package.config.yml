@@ -1,0 +1,7 @@
+# PySide6 Essentials 6.11.3 ships a virtual keyboard plugin without its QML framework.
+# The app uses native keyboard input, so omit this optional plugin if unresolved.
+- module-name: 'PySide6'
+  import-hacks:
+    - acceptable-missing-dlls:
+        - 'libqtvirtualkeyboardplugin'
+        - 'qtvirtualkeyboardplugin'
