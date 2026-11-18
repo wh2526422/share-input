@@ -15,6 +15,18 @@ import threading
 NUMBER_ROW_KEYS = {'-': (0x1B, False), '_': (0x1B, True),
                    '=': (0x18, False), '+': (0x18, True)}
 
+# IOLLEvent.h: flagsChanged carries both generic and device-side modifier bits.
+MODIFIER_FLAGS = (
+    (Key.shift_l, kCGEventFlagMaskShift, 0x0002),
+    (Key.shift_r, kCGEventFlagMaskShift, 0x0004),
+    (Key.ctrl_l, kCGEventFlagMaskControl, 0x0001),
+    (Key.ctrl_r, kCGEventFlagMaskControl, 0x2000),
+    (Key.alt_l, kCGEventFlagMaskAlternate, 0x0020),
+    (Key.alt_r, kCGEventFlagMaskAlternate, 0x0040),
+    (Key.cmd_l, kCGEventFlagMaskCommand, 0x0008),
+    (Key.cmd_r, kCGEventFlagMaskCommand, 0x0010),
+)
+
 
 class MacKeyboardController(Controller):
     def __init__(self):
@@ -57,7 +69,7 @@ class MacKeyboardController(Controller):
                 super().press(key)
                 super().release(key)
             else:
-                self._caps_input_source.toggle()
+                self._caps_input_source.toggle(self._remote_modifier_flags())
 
     def cancel_caps_lock(self):
         with self._caps_press_lock:
@@ -65,16 +77,17 @@ class MacKeyboardController(Controller):
             if pending is not None and pending[1] is False:
                 super().release(Key.caps_lock)
 
-    def merge_mouse_modifiers(self, event_type, event):
-        """将远端按住的修饰键合并到本地鼠标事件，保留原有本地标志。"""
+    def _remote_modifier_flags(self):
         flags = 0
-        with self.modifiers as modifiers:
-            for key, mask in ((Key.shift, kCGEventFlagMaskShift),
-                              (Key.cmd, kCGEventFlagMaskCommand),
-                              (Key.ctrl, kCGEventFlagMaskControl),
-                              (Key.alt, kCGEventFlagMaskAlternate)):
-                if key in modifiers:
-                    flags |= mask
+        with self._modifiers_lock:
+            for key, generic, side in MODIFIER_FLAGS:
+                if key.value in self._modifiers:
+                    flags |= generic | side
+        return flags
+
+    def merge_mouse_modifiers(self, event_type, event):
+        """合并远端修饰键的通用及左右状态，保留鼠标事件原有的本地标志。"""
+        flags = self._remote_modifier_flags()
         if flags:
             CGEventSetFlags(event, CGEventGetFlags(event) | flags)
         return event
@@ -125,7 +138,7 @@ class MacKeyboardController(Controller):
                          Key.cmd, Key.cmd_l, Key.cmd_r, Key.caps_lock)
         if any(key == item.value for item in modifier_keys):
             CGEventSetType(event, kCGEventFlagsChanged)
-        flags = CGEventGetFlags(event)
+        flags = CGEventGetFlags(event) | self._remote_modifier_flags()
         if key.vk in (0x45, 0x4E):
             flags |= kCGEventFlagMaskNumericPad
         if self._caps_lock:

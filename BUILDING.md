@@ -119,6 +119,64 @@ Windows 从终端执行 `ShareInput.exe --build-smoke-test`。
 Linux 自检需要 X11 会话，因为 pynput 后端加载也要连接 X server。
 通过自检仍需进行跨设备的剪贴板、文件、投屏、组合键、鼠标操作验证。
 
+## 断开连接崩溃修复（2026-11-16）
+
+Mac 报告中的 `ClientGUI.disconnect → Nuitka_Method_tp_dealloc → Nuitka_Function_tp_dealloc + 28`
+发生在 `desktop.end(notify_peer=False)` 返回后的引用释放。最小复现确认，
+`QMenu.addAction(text, compiled_method)` 在菜单销毁时会过度释放编译函数；
+它绕过了 Nuitka 对 `SignalInstance.connect` 的保护，因此只升级到当前固定依赖仍不能覆盖此入口。
+
+Qt 回调统一通过 `connect_signal` 注册，由 `functools.partial` 持有业务回调；
+投屏菜单改为先创建 QAction，再连接信号。复选框的全选按钮显式使用 `clicked[bool]`，保留选中状态参数。
+这些修改由 Mac、Linux、Windows 共用，已有二进制需要在各自平台重新编译。
+
+`tests/check_native_lifecycle.py` 使用假输入处理器和内存配置，不启动监听、采屏、输入注入或写入配置。
+Mac 上源码和 Nuitka 编译版均通过 100 轮客户端创建、菜单结束投屏、断开连接、定时器取消、
+全屏和固定按钮、窗口销毁及对象回收检查。新 Mac ARM64 应用的发布包自检及签名校验通过。
+另外，源码和编译版的键盘共享回归均在 Mac 上通过 30 轮，覆盖双向开始/停止共享、按下/释放、
+停止共享时释放未松开的键，以及多设备选择对话框；输入注入由假处理器接收。
+
+已只读检查 Linux 主机 `192.168.10.162`：`/var/log/apport.log` 确认
+2026-11-16 17:00:15 的 ShareInput PID 349062 收到 SIGSEGV（信号 11），
+比 Mac 报告早约 9 秒。Apport 因该可执行文件不属于系统软件包而跳过了 core 保存，
+所以没有这次段错误的完整原生栈。当天更早运行的 syslog 还出现
+`desktop.py:168` 调用结束投屏方法却报 `_error_handler() got an unexpected keyword argument 'notify_peer'`，
+与编译函数提前释放后被复用的现象一致，但不足以证明 17:00:15 的具体崩溃点。
+提取的记录保存在 `outputs/linux-crash-2026-11-16.log`；没有修改或重启远端正在运行的程序。
+
+Linux 新版在导入 Qt 前启用 faulthandler，致命信号栈写入
+`${XDG_CONFIG_HOME:-~/.config}/share-input/crash.log`。已模拟验证配置目录和堆栈输出，
+但 Linux 本机的新版构建及运行仍待验证。
+
+## Mac CapsLock 再次无法切换的处理（2026-11-18）
+
+用户反馈远端 CapsLock 再次无法切换，图标停留在英文；确认故障时本机 Control＋空格仍可切换。
+当前短按优先读取 `com.apple.symbolichotkeys` 的输入源快捷键并发送硬件按键事件，
+切换时暂时处理并恢复本地、远端修饰键。支持自定义快捷键；两个快捷键均禁用时保留原生 Caps 路径。
+多个输入源时遵循输入源快捷键的选择顺序。长按、解锁、断线取消及通信协议没有改变。
+
+独立调用旧系统键的源码及编译版均能切换，未在最小程序中复现用户的间歇性故障，
+因此这次是根据用户已验证有效的快捷键调整切换路径，没有将旧路径的具体故障原因认定为已定位。
+本机真实测试中，新路径可从 ABC 切到拼音，并在独立 Qt 输入框将 `nihao` 组词为“你好”；
+结束后恢复原输入源。后台线程＋Qt 主循环的 Nuitka 编译版也完成了 ABC／拼音双向切换及恢复。
+输入源快捷键、自定义配置、修饰键恢复及异常清理、原生回退、Caps 短按／长按／取消、
+字母硬件键位、Shift＋本地鼠标和 30 轮双向键盘共享回归通过。
+这些检查不等同于替换正式应用后的跨设备实测；当前应用保留运行，交由用户手动替换。
+Mac ARM64 安装包已重新构建，启动自检和完整签名校验通过；分发文件为
+`dist/macos-arm64/ShareInput-macos-arm64-20261118.zip`。本次只需更新 Mac 接收端。
+
+## Mac CapsLock 切换路径调整（2026-11-17）
+
+用户确认字母键位和 Shift＋本地鼠标修改后，仍出现输入法图标切换、实际只能输入英文，
+按 Mac 本机 CapsLock 才恢复的情况。短按路径已从 `TISSelectInputSource` 改为
+IOHIDSystem 的 Caps 系统键按下/松开，由系统处理切换；不再在发送失败后回退到只选择输入源。
+原生事件格式参考 [LinearMouse 的实现](https://github.com/linearmouse/linearmouse/blob/main/Modules/KeyKit/Sources/KeyKit/SystemDefinedKey.swift)。
+
+已用本机 SDK 的 C 程序核对 NXEventData 的大小、对齐和字段偏移。
+`tests/check_macos_native_caps.py` 的源码及 Nuitka 编译版检查通过，覆盖系统键数据、资源释放、
+权限拒绝、发送失败、短按、长按、取消及旧端缺少时间戳的情况；字母键位和鼠标修饰键回归通过。
+这些测试没有向系统发送按键。测试 Python 没有系统事件注入权限，真实拼音候选词恢复仍需授权应用实测。
+
 ## 本机验证记录（2026-11-13）
 
 - Mac ARM64 应用已实际构建，包含选定的 A 图标，包体约 91 MiB；签名校验和项目外目录的部署自检通过。
