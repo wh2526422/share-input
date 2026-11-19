@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import qt_runtime as tk
 from ui import choose_value
 
+from desktop_audio import AUDIO_PROFILE, can_capture_audio, can_play_audio
 from desktop_stream import (
     DEFAULT_RESOLUTION, RESOLUTION_PROFILES, DesktopSession, check_screen_permission,
     close_socket, list_displays,
@@ -53,6 +54,11 @@ def remote_displays(value):
 def choose_display(root, displays, current):
     index = choose_value(root, '选择远程显示器', display_names(displays), current)
     return index
+
+
+def audio_generation(data):
+    value = data.get('generation')
+    return value if type(value) is int and 0 < value <= 0xFFFFFFFF else None
 
 
 class DesktopController:
@@ -102,6 +108,7 @@ class DesktopController:
         self._preferred_resolution = profile
         session = DesktopSession(connection, label, secrets.token_hex(16), secrets.token_hex(32),
                                  viewer=True, resolution=RESOLUTION_PROFILES[profile])
+        session.audio_supported = can_play_audio()
         self.session = session
         self._changed()
         self.log(f"正在请求 {label} 的屏幕（最高 {profile}）")
@@ -109,6 +116,7 @@ class DesktopController:
             'id': session.id, 'token': session.token, 'resolution': profile,
             'live_resolution': True, 'live_fps': True, 'low_latency': True,
             'live_display': True, 'network_latency': True,
+            'audio': AUDIO_PROFILE if session.audio_supported else None,
         })
 
     def receive(self, connection, label, msg_type, data):
@@ -243,10 +251,18 @@ class DesktopController:
                                data.get('live_fps') is True,
                                data.get('low_latency') is True,
                                data.get('live_display') is True,
-                               data.get('network_latency') is True)
+                               data.get('network_latency') is True,
+                               data.get('audio') == AUDIO_PROFILE)
         elif session is not None and connection is session.control and session_id == session.id:
             if msg_type == MessageType.DESKTOP_STOP:
                 self.end("对端已结束投屏", notify_peer=False)
+            elif (msg_type == MessageType.DESKTOP_AUDIO and not self.server and not session.viewer
+                  and session.approved.is_set()):
+                generation = audio_generation(data)
+                if generation is not None:
+                    audio = session.begin_audio(generation)
+                    if audio is not None:
+                        threading.Thread(target=self._dial_audio, args=(session, audio), daemon=True).start()
             elif msg_type == MessageType.DESKTOP_RESPONSE and session.viewer and not session.approved.is_set():
                 if data.get('accepted') is True:
                     profile = normalize_resolution(data.get('resolution'))
@@ -264,6 +280,7 @@ class DesktopController:
                     if type(index) is int and 0 <= index < len(session.displays):
                         session.display_index = index
                     session.host_platform = data.get('host_platform')
+                    session.audio_supported &= data.get('audio') == AUDIO_PROFILE
                     self._approve(session)
                     if not self.server:
                         threading.Thread(target=self._dial, args=(session,), daemon=True).start()
@@ -278,7 +295,7 @@ class DesktopController:
                     self.end("对端未接受投屏请求", notify_peer=False)
 
     def _incoming(self, connection, label, session_id, token, profile, live_resolution, live_fps,
-                  low_latency=False, live_display=False, network_latency=False):
+                  low_latency=False, live_display=False, network_latency=False, audio=False):
         session = DesktopSession(connection, label, session_id, token, viewer=False,
                                  resolution=RESOLUTION_PROFILES[profile], live_resolution=live_resolution,
                                  live_fps=live_fps, low_latency=low_latency,
@@ -299,6 +316,7 @@ class DesktopController:
             session.displays = displays
             session.display_index = 0
             session.display = displays[0]
+            session.audio_supported = audio and can_capture_audio()
             self.log(f"已接受来自 {label} 的远程桌面连接")
             self._approve(session)
             self._reply(session, accepted=True, profile=profile)
@@ -318,12 +336,16 @@ class DesktopController:
         session.deadline = time.monotonic() + 20
         session.approved.set()
         if session.viewer:
-            self.viewer = DesktopViewer(self.root, session, self.end)
+            self.viewer = DesktopViewer(self.root, session, self.end, self._connect_audio)
             listener = getattr(self.handler, 'keyboard_listener', None)
             self.viewer.native_caps = (platform.system() in ('Windows', 'Linux')
                                        and session.host_platform == 'Darwin'
                                        and listener is not None and listener.is_alive())
             self.log("投屏窗口已打开，等待画面")
+            if session.audio_supported:
+                self.log("远端声音将在收到首帧后自动连接")
+            else:
+                self.log("当前投屏双方未协商到远端声音")
         else:
             self.log(f"正在向 {session.label} 共享屏幕")
         self._changed()
@@ -361,6 +383,8 @@ class DesktopController:
             data.update(live_display=True, displays=session.displays, display_index=session.display_index)
         if accepted and session.network_latency:
             data['network_latency'] = True
+        if accepted and session.audio_supported:
+            data['audio'] = AUDIO_PROFILE
         self._signal(session, MessageType.DESKTOP_RESPONSE, data,
                      self._dial if accepted and not self.server else None)
 
@@ -399,7 +423,8 @@ class DesktopController:
             return
         if address[0] != session.control.getpeername()[0]:
             return
-        if data.get('kind') == 'latency':
+        kind = data.get('kind')
+        if kind == 'latency':
             if not session.network_latency or not session.approved.wait(timeout=5):
                 return
             if session.attach_probe(connection):
@@ -407,6 +432,11 @@ class DesktopController:
                 Protocol.send_message(connection, Protocol.encode(
                     MessageType.DESKTOP_CHANNEL, {'id': session.id, 'kind': 'latency'}))
                 session.run_probe()
+            return
+        if kind == 'audio':
+            self._accept_audio(session, connection, data)
+            return
+        if kind is not None:
             return
         if not session.approved.wait(timeout=5) or not session.attach(connection):
             return
@@ -416,6 +446,74 @@ class DesktopController:
             session.run(self.handler)
         finally:
             session.close()
+
+    def _connect_audio(self, session, audio):
+        if self.server:
+            self._signal(session, MessageType.DESKTOP_AUDIO, {
+                'id': session.id, 'generation': audio.generation,
+            })
+        else:
+            threading.Thread(target=self._dial_audio, args=(session, audio), daemon=True).start()
+
+    def _dial_audio(self, session, audio):
+        connection = None
+        try:
+            if audio.stopped.is_set():
+                return
+            connection = socket.create_connection(session.control.getpeername(), timeout=3)
+            if not audio.attach(connection):
+                return
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            greeting = Protocol.receive_message(connection, max_size=65536)
+            if not greeting or greeting[0] != MessageType.SCREEN_INFO:
+                raise OSError('未收到音频通道握手')
+            hello = {'id': session.id, 'kind': 'audio', 'generation': audio.generation}
+            Protocol.send_message(connection, Protocol.encode(
+                MessageType.DESKTOP_CHANNEL, dict(hello, token=session.token)))
+            if Protocol.receive_message(connection, max_size=65536) != (MessageType.DESKTOP_CHANNEL, hello):
+                raise OSError('对端未接受音频通道')
+            self._run_audio(session, audio, connection)
+        except OSError as exc:
+            audio.stop(f'无法连接远端声音：{exc}', retryable=True)
+            if audio.error and not session.viewer:
+                session.report(audio.error, 'WARNING')
+        finally:
+            if connection is not None:
+                close_socket(connection)
+
+    def _accept_audio(self, session, connection, data):
+        generation = audio_generation(data)
+        if generation is None or not session.audio_supported or not session.approved.is_set():
+            return
+        audio = session.audio if session.viewer else session.begin_audio(generation)
+        if audio is None or audio.generation != generation or not audio.attach(connection):
+            return
+        try:
+            connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            Protocol.send_message(connection, Protocol.encode(MessageType.DESKTOP_CHANNEL, {
+                'id': session.id, 'kind': 'audio', 'generation': generation,
+            }))
+            self._run_audio(session, audio, connection)
+        except OSError as exc:
+            audio.stop(f'无法连接远端声音：{exc}', retryable=True)
+
+    @staticmethod
+    def _run_audio(session, audio, connection):
+        try:
+            if audio.stopped.is_set():
+                return
+            if session.viewer:
+                audio.receive(connection)
+            else:
+                audio.capture(connection)
+        except OSError as exc:
+            audio.stop(f'远端音频失败：{exc}', retryable=session.viewer)
+        except Exception as exc:
+            audio.stop(f'远端音频失败：{exc}')
+        finally:
+            audio.stop()
+            if audio.error and not session.viewer:
+                session.report(audio.error, 'WARNING')
 
     def _dial_probe(self, session):
         while not session.closed.is_set():

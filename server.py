@@ -528,7 +528,8 @@ class ServerGUI:
         if msg_type == MessageType.INPUT_SHARE:
             self._receive_shared_input(peer, data)
             return
-        if msg_type in (MessageType.DESKTOP_REQUEST, MessageType.DESKTOP_RESPONSE, MessageType.DESKTOP_STOP):
+        if msg_type in (MessageType.DESKTOP_REQUEST, MessageType.DESKTOP_RESPONSE,
+                        MessageType.DESKTOP_STOP, MessageType.DESKTOP_AUDIO):
             if peer.desktop:
                 self.desktop.receive(peer.socket, peer.label, msg_type, data)
             return

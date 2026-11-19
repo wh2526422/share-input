@@ -28,6 +28,7 @@ class MessageType(Enum):
     DESKTOP_RESPONSE = "desktop_response"
     DESKTOP_STOP = "desktop_stop"
     DESKTOP_CHANNEL = "desktop_channel"
+    DESKTOP_AUDIO = "desktop_audio"
 
 
 class Protocol:

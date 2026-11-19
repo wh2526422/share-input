@@ -12,6 +12,7 @@ import threading
 import time
 
 from protocol import Protocol
+from desktop_audio import DesktopAudio
 from desktop_frames import LatestFrames
 
 
@@ -398,6 +399,8 @@ class DesktopSession:
         self.error = None
         self._media = None
         self._lock = threading.Lock()
+        self.audio_supported = False
+        self.audio = None
         self._events = queue.Queue(maxsize=128)
         self._frame = None
         self._pending_resolution = None
@@ -488,6 +491,21 @@ class DesktopSession:
             self._probe = connection
             return True
 
+    def begin_audio(self, generation=None):
+        with self._lock:
+            if not self.audio_supported or self.closed.is_set():
+                return None
+            previous = self.audio
+            last_generation = previous.generation if previous is not None else 0
+            if generation is None:
+                generation = last_generation + 1
+            if generation <= last_generation:
+                return None
+            audio = self.audio = DesktopAudio(generation)
+        if previous is not None:
+            previous.stop()
+        return audio
+
     def run_probe(self):
         connection = self._probe
         if connection is None:
@@ -534,6 +552,8 @@ class DesktopSession:
                 close_socket(self._media)
             if self._probe is not None:
                 close_socket(self._probe)
+            if self.audio is not None:
+                self.audio.stop()
 
     def _worker(self, operation):
         def run():

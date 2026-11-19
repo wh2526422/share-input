@@ -9,6 +9,9 @@ from key_mapping import X11_MODIFIERS
 from desktop_stream import COORD_MAX, FPS_PROFILES, RESOLUTION_PROFILES
 
 
+AUDIO_RETRY_DELAYS = (0.5, 1.5, 3)
+
+
 def fit_rect(vw,vh,iw,ih):
     scale=min(vw/iw,vh/ih); w,h=max(1,int(iw*scale)),max(1,int(ih*scale))
     return (vw-w)//2,(vh-h)//2,w,h
@@ -153,7 +156,7 @@ class ViewerWindow(W.QWidget):
 
 
 class DesktopViewer(C.QObject):
-    def __init__(self,root,session,stop):
+    def __init__(self,root,session,stop,connect_audio):
         super().__init__(root); self.session=session; self.stop=stop
         self.window=ViewerWindow(root,C.Qt.Window); self.window.viewer=self
         self.window.setWindowTitle('远程桌面 · '+session.label); self.window.resize(960,580); self.window.setMinimumSize(320,240)
@@ -171,6 +174,18 @@ class DesktopViewer(C.QObject):
         self.control=W.QPushButton('控制'); self.control.setMenu(self.menu); row.addWidget(self.control)
         self.device=W.QLabel(session.label); self.device.setMaximumWidth(180); row.addWidget(self.device)
         row.addStretch(); self.latency=W.QLabel(); row.addWidget(self.latency); self.status=W.QLabel('等待画面…'); row.addWidget(self.status)
+        self._audio_player = None
+        self._audio_connect = connect_audio
+        self._audio_auto_start = session.audio_supported
+        self._audio_retry_at = None
+        self._audio_retries = 0
+        if session.audio_supported:
+            self._audio_toggle = W.QPushButton('远端声音')
+            self._audio_toggle.setCheckable(True)
+            self._audio_toggle.setEnabled(False)
+            self._audio_toggle.setToolTip('投屏连接后自动播放远端声音')
+            connect_signal(self._audio_toggle.toggled, self._toggle_audio)
+            row.addWidget(self._audio_toggle)
         self.pin=W.QPushButton(); self.pin.setCheckable(True); self.pin.setToolTip('固定悬浮条，保持显示'); self.pin.setAccessibleName('固定悬浮条'); connect_signal(self.pin.toggled, self.pin_toolbar); row.addWidget(self.pin)
         self.full=W.QPushButton(); self.full.setToolTip('进入全屏（F11）'); self.full.setAccessibleName('进入全屏'); connect_signal(self.full.clicked, self.toggle_fullscreen); row.addWidget(self.full)
         for widget in (self.pin,self.full):
@@ -187,6 +202,20 @@ class DesktopViewer(C.QObject):
                 action=submenu.addAction(text); action.setCheckable(True); group.addAction(action)
                 connect_signal(action.triggered, lambda checked=False,k=kind,v=value:self.select(k,v)); actions.append((value,action))
             self.groups[kind]=(submenu,actions)
+        if session.audio_supported:
+            audio_menu = self.menu.addMenu('远端音量')
+            volume_action = W.QWidgetAction(audio_menu)
+            controls = W.QWidget()
+            volume_row = W.QHBoxLayout(controls)
+            volume_row.addWidget(W.QLabel('本地音量'))
+            self._audio_volume = W.QSlider(C.Qt.Horizontal)
+            self._audio_volume.setAccessibleName('远端声音本地音量')
+            self._audio_volume.setRange(0, 100)
+            self._audio_volume.setValue(70)
+            volume_row.addWidget(self._audio_volume)
+            volume_action.setDefaultWidget(controls)
+            audio_menu.addAction(volume_action)
+            connect_signal(self._audio_volume.valueChanged, self._set_audio_volume)
         if sys.platform.startswith('linux') and session.host_platform=='Darwin':
             self.menu.addSeparator()
             for char,title in (('c','复制 ⌘C'),('v','粘贴 ⌘V')):
@@ -205,6 +234,7 @@ class DesktopViewer(C.QObject):
         return False
     def layout_toolbar(self):
         width=self.window.width(); self.device.setVisible(width>=850); self.status.setVisible(width>=660)
+        self.latency.setVisible(not self.session.audio_supported or width >= 420)
         self.toolbar.setGeometry(12,12,max(1,width-24),self.toolbar.sizeHint().height()); self.toolbar.raise_()
     def schedule_toolbar_hide(self):
         if self.pin.isChecked(): self.hide_timer.stop()
@@ -232,6 +262,12 @@ class DesktopViewer(C.QObject):
         if self._destroyed: return None
         if self._motion is not None: self.session.send_input(self._motion); self._motion=None
         session=self.session
+        if self._audio_auto_start and session.first_frame.is_set():
+            self._audio_auto_start = False
+            self._audio_toggle.setEnabled(True)
+            self._audio_toggle.setChecked(True)
+        if self._audio_player is not None or self._audio_retry_at is not None:
+            self._update_audio()
         self._update_latency()
         for kind,(menu,actions) in self.groups.items():
             pending=getattr(session,'pending_'+kind)
@@ -247,6 +283,80 @@ class DesktopViewer(C.QObject):
             session.record_performance('convert_ui',time.perf_counter()-started)
             self.status.setText(f'{image.width}×{image.height} · {session.fps} 帧'); self.screen.update()
         return first
+
+    def _toggle_audio(self, enabled):
+        self._audio_retry_at = None
+        self._audio_retries = 0
+        if not enabled:
+            if self._audio_player is not None:
+                self._audio_player.channel.stop()
+                self._audio_player = None
+            self._audio_toggle.setText('远端声音')
+            self._audio_toggle.setToolTip('播放远端系统声音')
+            return
+        self._start_audio()
+
+    def _start_audio(self):
+        audio = self.session.begin_audio()
+        if audio is None:
+            self._audio_toggle.setChecked(False)
+            return
+        try:
+            from desktop_audio_player import AudioPlayer
+            self._audio_player = AudioPlayer(audio, self._audio_volume.value() / 100)
+            self._audio_player.start()
+        except (ImportError, OSError, RuntimeError) as exc:
+            audio.stop(f'远端声音播放失败：{exc}')
+            self._show_audio_error(audio.error)
+            return
+        self._audio_toggle.setText('声音连接中')
+        self._audio_toggle.setToolTip('正在连接远端声音，点击取消')
+        self._audio_connect(self.session, audio)
+
+    def _set_audio_volume(self, value):
+        if self._audio_player is not None:
+            self._audio_player.volume = value / 100
+
+    def _update_audio(self):
+        now = time.monotonic()
+        if self._audio_retry_at is not None:
+            if now >= self._audio_retry_at:
+                self._audio_retry_at = None
+                self._start_audio()
+            return
+        audio = self._audio_player.channel
+        age = now - audio.started
+        if not audio.receiving.is_set() and age > 13:
+            audio.stop('远端声音连接超时', retryable=True)
+        if audio.stopped.is_set():
+            if audio.retryable and self._audio_retries < len(AUDIO_RETRY_DELAYS):
+                self._audio_player = None
+                self._audio_retry_at = now + AUDIO_RETRY_DELAYS[self._audio_retries]
+                self._audio_retries += 1
+                self._audio_toggle.setText('声音重连中')
+                self._audio_toggle.setToolTip('正在重新连接远端声音，点击取消')
+                self.session.report(f'{audio.error}，正在重连（{self._audio_retries}/{len(AUDIO_RETRY_DELAYS)}）',
+                                    'WARNING')
+            elif audio.error:
+                self._show_audio_error(audio.error)
+            else:
+                self._audio_toggle.setChecked(False)
+        elif audio.receiving.is_set():
+            if age >= 30:
+                self._audio_retries = 0
+            if self._audio_player.playing.is_set() and self._audio_toggle.text() != '声音已开启':
+                self._audio_toggle.setText('声音已开启')
+                self._audio_toggle.setToolTip('点击关闭远端声音')
+                self.session.report('远端声音已连接')
+            elif self._audio_toggle.text() == '声音连接中':
+                self._audio_toggle.setText('声音等待中')
+                self._audio_toggle.setToolTip('已连接，等待远端播放声音')
+
+    def _show_audio_error(self, message):
+        self.session.report(message, 'WARNING')
+        self._audio_toggle.setChecked(False)
+        self._audio_toggle.setText('声音连接失败')
+        self._audio_toggle.setToolTip(message)
     def _update_latency(self):
         session=self.session
         rtt=session.network_rtt_ms
@@ -329,4 +439,7 @@ class DesktopViewer(C.QObject):
         elif not pressed and (self._active or self._keys._pressed): self._keys.release(translated)
     def destroy(self):
         if self._destroyed:return
+        if self._audio_player is not None:
+            self._audio_player.channel.stop()
+            self._audio_player = None
         self.release(); self._destroyed=True; self.hide_timer.stop(); self.window.hide(); self.window.deleteLater(); self.deleteLater()

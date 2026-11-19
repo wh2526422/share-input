@@ -96,7 +96,7 @@ def command(target, python, output, jobs, compiler='msvc', fast_jpeg=False):
     args = [str(python), '-m', 'nuitka',
             '--mode=app-dist' if target == 'macos' else '--mode=standalone',
             '--enable-plugin=pyside6',
-            '--include-qt-plugins=platforms,platforminputcontexts,iconengines,imageformats',
+            '--include-qt-plugins=platforms,platforminputcontexts,iconengines,imageformats,multimedia',
             '--noinclude-qt-plugins=styles,tls',
             '--noinclude-dlls=*qtvirtualkeyboard*',
             '--noinclude-qt-translations', '--lto=yes',
@@ -128,7 +128,8 @@ def command(target, python, output, jobs, compiler='msvc', fast_jpeg=False):
     modules += [path.stem for path in sorted((ROOT / 'src').glob('*.py'))
                 if path.stem not in excluded
                 and (target == 'macos' or not path.stem.startswith('macos_'))
-                and (target == 'windows' or not path.stem.startswith('windows_'))]
+                and (target == 'windows' or not path.stem.startswith('windows_'))
+                and (target == 'linux' or not path.stem.startswith('linux_'))]
     args += [f'--include-module={name}' for name in modules]
     if target == 'macos':
         # Nuitka's downloaded Intel ccache can start Apple's tools under
@@ -191,7 +192,7 @@ def main():
     if not args.skip_install:
         subprocess.run([str(python), '-m', 'pip', 'install', '-r', str(ROOT / 'requirements.txt'),
                         '-r', str(ROOT / 'requirements-build.txt'),
-                        'PySide6-Essentials==6.11.3', 'shiboken6==6.11.3'], check=True)
+                        'PySide6-Essentials==6.11.3', 'PySide6-Addons==6.11.3', 'shiboken6==6.11.3'], check=True)
         optional = subprocess.run([str(python), '-m', 'pip', 'install', '--only-binary=:all:',
                                    'turbojpeg==0.0.2'])
         if optional.returncode:

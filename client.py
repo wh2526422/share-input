@@ -705,7 +705,8 @@ class ClientGUI:
         elif msg_type == MessageType.FILE_OFFER:
             if connection is not None and connection is self.socket and self._file_token:
                 self.files.receive_offer(connection, self._file_token, f"服务端 {self.server_ip}", data)
-        elif msg_type in (MessageType.DESKTOP_REQUEST, MessageType.DESKTOP_RESPONSE, MessageType.DESKTOP_STOP):
+        elif msg_type in (MessageType.DESKTOP_REQUEST, MessageType.DESKTOP_RESPONSE,
+                          MessageType.DESKTOP_STOP, MessageType.DESKTOP_AUDIO):
             if connection is not None and connection is self.socket and self._desktop_supported:
                 self.desktop.receive(connection, f"服务端 {self.server_ip}", msg_type, data)
 
