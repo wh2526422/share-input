@@ -298,6 +298,7 @@ class RemoteInput:
         self.display = display
         self.keys = {}
         self.buttons = set()
+        self._pointer = None
 
     def release(self):
         cancel_caps = getattr(self.handler, 'cancel_pending_caps_lock', None)
@@ -309,16 +310,21 @@ class RemoteInput:
             self.handler.simulate_mouse_click(button, False)
         self.keys.clear()
         self.buttons.clear()
+        self._pointer = None
 
     def _move(self, data):
         x, y = data.get('x'), data.get('y')
         if not all(type(value) is int and 0 <= value <= COORD_MAX for value in (x, y)):
             return False
         display = self.display
-        self.handler.simulate_mouse_move(
+        position = (
             display['left'] + x * (display['width'] - 1) // COORD_MAX,
             display['top'] + y * (display['height'] - 1) // COORD_MAX,
         )
+        # 松键包也带位置。原地点击不应在按住期间再注入鼠标移动。
+        if not self.buttons or position != self._pointer:
+            self.handler.simulate_mouse_move(*position)
+            self._pointer = position
         return True
 
     def apply(self, data):
@@ -333,15 +339,17 @@ class RemoteInput:
             button, pressed = data.get('button'), data.get('pressed')
             if button not in ('left', 'middle', 'right') or type(pressed) is not bool:
                 return
-            moved = self._move(data)
-            if moved and pressed:
+            if pressed:
+                if not self._move(data):
+                    return
                 count = data.get('click_count')
                 if type(count) is int and 1 <= count <= 10:
                     self.handler.simulate_mouse_click(button, True, click_count=count)
                 else:
                     self.handler.simulate_mouse_click(button, True)
                 self.buttons.add(button)
-            elif not pressed and button in self.buttons:
+            elif button in self.buttons:
+                self._move(data)
                 self.handler.simulate_mouse_click(button, False)
                 self.buttons.remove(button)
         elif kind == 'scroll':

@@ -10,6 +10,7 @@ from desktop_stream import COORD_MAX, FPS_PROFILES, RESOLUTION_PROFILES
 
 
 AUDIO_RETRY_DELAYS = (0.5, 1.5, 3)
+TOOLBAR_HOVER_MS = 350
 
 
 def fit_rect(vw,vh,iw,ih):
@@ -63,6 +64,9 @@ class Screen(W.QWidget):
         self._wheel_angle = [0, 0]
         self._wheel_pixel = [0, 0]
         self._at_hot_edge = False
+        self._toolbar_timer = C.QTimer(self)
+        self._toolbar_timer.setSingleShot(True)
+        connect_signal(self._toolbar_timer.timeout, viewer.show_toolbar)
     def event(self,event):
         v=getattr(self,'viewer',None)
         if v is not None and v._active and v._image is not None:
@@ -91,8 +95,13 @@ class Screen(W.QWidget):
         pos=event.position().toPoint()
         if not self.rect().contains(pos):
             v.release(); return
-        self._at_hot_edge = event.position().y()<=7
-        if self._at_hot_edge or (v.toolbar.isVisible() and v.toolbar.geometry().contains(pos)):
+        at_hot_edge = event.position().y() <= 7
+        if not at_hot_edge:
+            self._toolbar_timer.stop()
+        elif not self._at_hot_edge and not v.toolbar.isVisible() and not v._buttons:
+            self._toolbar_timer.start(TOOLBAR_HOVER_MS)
+        self._at_hot_edge = at_hot_edge
+        if not v._buttons and v.toolbar.isVisible() and v.toolbar.geometry().contains(pos):
             v.show_toolbar(); return
         if v.toolbar.isVisible() and not v.hide_timer.isActive():
             v.schedule_toolbar_hide()
@@ -102,6 +111,7 @@ class Screen(W.QWidget):
         v._motion={'kind':'move',**point} if v._active and point else None
     def leaveEvent(self,event):
         self._at_hot_edge = False
+        self._toolbar_timer.stop()
         if self.viewer._mouse_grabbed:
             self.viewer.release()
         self.viewer.schedule_toolbar_hide()
@@ -229,7 +239,9 @@ class DesktopViewer(C.QObject):
         self.schedule_toolbar_hide()
 
     def eventFilter(self,obj,event):
-        if event.type()==C.QEvent.Enter: self.release(); self.hide_timer.stop()
+        if event.type()==C.QEvent.Enter:
+            self.hide_timer.stop()
+            if not self._buttons: self.release()
         elif event.type()==C.QEvent.Leave: self.schedule_toolbar_hide()
         return False
     def layout_toolbar(self):
@@ -387,6 +399,7 @@ class DesktopViewer(C.QObject):
                 self._mouse_grabbed=W.QWidget.mouseGrabber() is self.screen
     def release(self):
         self._input_epoch+=1
+        self.screen._toolbar_timer.stop()
         if self._mouse_grabbed:
             self._mouse_grabbed=False
             self.screen.releaseMouse()
@@ -402,8 +415,10 @@ class DesktopViewer(C.QObject):
         if not(0<=px<w and 0<=py<h): return None
         return {'x':int(px*COORD_MAX/max(1,w-1)),'y':int(py*COORD_MAX/max(1,h-1))}
     def click(self,event,pressed,click_count=1):
-        if pressed and self.toolbar.isVisible() and self.toolbar.geometry().contains(event.position().toPoint()):
-            self.show_toolbar(); return
+        if pressed:
+            self.screen._toolbar_timer.stop()
+            if not self._buttons and self.toolbar.isVisible() and self.toolbar.geometry().contains(event.position().toPoint()):
+                self.show_toolbar(); return
         point=self.point(event); name={C.Qt.LeftButton:'left',C.Qt.RightButton:'right',C.Qt.MiddleButton:'middle'}.get(event.button())
         if not name: return
         if pressed and point:
